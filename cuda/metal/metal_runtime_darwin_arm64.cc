@@ -40,7 +40,7 @@ uint64_t active_external_token = 0;
 
 constexpr size_t zero_buffer_bytes = 4096;
 constexpr size_t max_buffer_arguments = 31;
-constexpr uint32_t max_operations_per_command_buffer = 256;
+constexpr uint32_t max_operations_per_command_buffer = 512;
 constexpr NSUInteger max_pending_command_buffers = 8;
 constexpr char runtime_kernel_source[] = R"METAL(
 #include <metal_stdlib>

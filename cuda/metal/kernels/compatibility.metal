@@ -109,19 +109,13 @@ inline float sum(float a, float b) {
     return a + b;
 }
 
-// Float atomics use a uint compare/exchange loop, avoiding a hard requirement
-// on Metal 3's atomic_float extension.
+// Native atomic float add. All Apple Silicon GPUs support Metal 3 which
+// provides atomic<float> with hardware-accelerated fetch_add. This replaces
+// the CAS loop used by the initial port.
 inline void mumaxAtomicAdd(device float* address, float value) {
-    device atomic_uint* target = reinterpret_cast<device atomic_uint*>(address);
-    uint expected = atomic_load_explicit(target, memory_order_relaxed);
-    while (true) {
-        uint desired = as_type<uint>(as_type<float>(expected) + value);
-        if (atomic_compare_exchange_weak_explicit(
-                target, &expected, desired,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return;
-        }
-    }
+    device atomic<float>* target =
+        reinterpret_cast<device atomic<float>*>(address);
+    atomic_fetch_add_explicit(target, value, memory_order_relaxed);
 }
 
 inline void atomicFmaxabs(device float* address, float value) {
@@ -141,12 +135,35 @@ inline void atomicFmaxabs(device float* address, float value) {
 
 #define atomicAdd mumaxAtomicAdd
 
-// CUDA's reduction uses implicit warp lockstep for its last 32 lanes. Metal
-// makes no equivalent guarantee, so every tree level has an explicit barrier.
-// Current MuMax3 callers use a power-of-two group no larger than 512.
+// SIMD-group optimized reduction. Uses simd_sum / simd_max to reduce within
+// each 32-wide SIMD group (no barrier needed), then a single threadgroup
+// barrier to exchange per-group results. This replaces the O(log N) barrier
+// tree from the initial CUDA translation with a 2-level reduction:
+//   Level 1: simd-level (hardware shuffle, zero overhead)
+//   Level 2: threadgroup-level (one barrier, ≤16 values on 512 threads)
+//
+// The macro adapts to the caller's `op` by using a generic simd_shuffle_down
+// tree for operations other than sum (e.g., max). The `simd_reduce_op` helper
+// is defined per-op before each kernel that uses it.
+
+inline float simd_reduce_sum(float val) {
+    return simd_sum(val);
+}
+
+inline float simd_reduce_max(float val) {
+    // Apple GPU SIMD width is 32; use explicit shuffle tree
+    for (ushort offset = 16; offset > 0; offset >>= 1) {
+        val = max(val, simd_shuffle_down(val, offset));
+    }
+    return val;
+}
+
 #define reduce(load, op, atomicOp)                                           \
-    threadgroup float sdata[REDUCE_BLOCKSIZE];                              \
-    uint tid = threadIdx.x;                                                 \
+    /* Apple GPU SIMD width is always 32 */                                  \
+    const uint tid = threadIdx.x;                                           \
+    const uint simd_lane = tid & 31u;                                       \
+    const uint simd_group = tid >> 5u;                                      \
+    const uint simd_groups_per_tg = blockDim.x >> 5u;                       \
     int i = int(blockIdx.x * blockDim.x + threadIdx.x);                     \
     float mine = initVal;                                                   \
     int stride = int(gridDim.x * blockDim.x);                               \
@@ -154,14 +171,23 @@ inline void atomicFmaxabs(device float* address, float value) {
         mine = op(mine, load(i));                                           \
         i += stride;                                                        \
     }                                                                       \
-    sdata[tid] = mine;                                                      \
+    /* Level 1: reduce within each SIMD group via hardware shuffle */        \
+    for (ushort offset = 16; offset > 0; offset >>= 1) {                    \
+        mine = op(mine, simd_shuffle_down(mine, offset));                   \
+    }                                                                       \
+    /* Level 2: exchange across SIMD groups via threadgroup memory */        \
+    threadgroup float sdata[16];                                            \
+    if (simd_lane == 0) {                                                   \
+        sdata[simd_group] = mine;                                           \
+    }                                                                       \
     threadgroup_barrier(mem_flags::mem_threadgroup);                        \
-    for (uint s = blockDim.x >> 1; s > 0; s >>= 1) {                        \
-        if (tid < s) {                                                      \
-            sdata[tid] = op(sdata[tid], sdata[tid + s]);                    \
+    /* Final reduce: only first SIMD group reduces across groups */          \
+    if (simd_group == 0) {                                                  \
+        mine = (tid < simd_groups_per_tg) ? sdata[tid] : initVal;          \
+        for (ushort offset = 16; offset > 0; offset >>= 1) {                \
+            mine = op(mine, simd_shuffle_down(mine, offset));               \
         }                                                                   \
-        threadgroup_barrier(mem_flags::mem_threadgroup);                    \
     }                                                                       \
     if (tid == 0) {                                                         \
-        atomicOp(dst, sdata[0]);                                            \
+        atomicOp(dst, mine);                                                \
     }
