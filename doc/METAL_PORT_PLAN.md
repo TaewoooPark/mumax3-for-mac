@@ -2,6 +2,16 @@
 
 CUDA 전용인 mumax³를 Apple Silicon GPU(Metal)에서 네이티브로 구동하기 위한 조사 결과 및 실행 계획.
 
+> 구현 업데이트: 이 문서의 조사 이후 실제 포트는 기존 `cuda` 공개 API를 유지하는
+> `darwin/arm64` 빌드 태그 방식으로 구현했다. 65개 production 커널은 감사 가능한
+> 생성기로 MSL로 변환하고, Metal 소스는 실행 시 컴파일·파이프라인 캐시한다
+> (CI에서는 `xcrun metal`로 65개 전체를 별도 정적 컴파일). FFT는 외부 의존성을
+> 추가하지 않는 macOS 14+ MPSGraph R2C/C2R을 채택했고, RNG는 Philox4x32-10,
+> reduction은 명시적 threadgroup barrier와 uint CAS float atomic을 사용한다.
+> 따라서 아래의 VkFFT 우선순위와 `.metallib` 상시 임베딩은 조사 단계의 후보안이며
+> 최종 구현과 다른 부분이다. 최종 감사 결과는
+> `cuda/metal/kernels/AUDIT.md`와 Apple Silicon CI를 기준으로 한다.
+
 ---
 
 ## 1. 현 코드베이스의 CUDA 의존성 실측
@@ -14,7 +24,7 @@ CUDA 전용인 mumax³를 Apple Silicon GPU(Metal)에서 네이티브로 구동�
 | 항목 | 수치 |
 |---|---|
 | Go 소스 | 346 파일 |
-| CUDA 커널 (`cuda/*.cu`) | **66 개** |
+| CUDA 커널 (`cuda/*.cu`) | **65 개** |
 | 자동 생성 래퍼 (`*_wrapper.go`) | 65 개 (임베딩된 PTX 총 **5.8 MB**) |
 | `cuda` 패키지 공개 API | 91 함수 |
 | `engine/`에서 `cuda.` 호출 지점 | 381 곳 |
@@ -32,9 +42,9 @@ CUDA 전용인 mumax³를 Apple Silicon GPU(Metal)에서 네이티브로 구동�
 | CUDA Graphs / multi-stream | **없음** (`stream0` 단일 스트림) | |
 | float atomics | `atomicAdd` 2개 커널<br>`atomicMax`(int 재해석) 4개 커널 | Metal 대응 필요 (§4.4) |
 | 커널 인자 타입 | `float`, `float*`, `int`, `uint8_t`, `uint8_t*` **5종뿐** | `cuda2go.go`의 `typemap` |
-| 최대 포인터 인자 수 | 16 (`slonczewski2.cu`) | Metal 31-buffer 한도 이내 ✅ |
+| 최대 포인터 인자 수 | 16 (`cubicanisotropy2.cu`) | Metal 31-buffer 한도 이내 ✅ |
 
-**결론: 커널 66개 전부가 "포인터 몇 개 + 스칼라 몇 개를 받아 인덱스 계산 후
+**결론: 커널 65개 전부가 "포인터 몇 개 + 스칼라 몇 개를 받아 인덱스 계산 후
 element-wise/stencil 연산"이라는 동일한 형태다.** 기계적 변환이 가능한 구조.
 
 ### 1.3 외부 CUDA 라이브러리 의존 (실제 사용 심볼만)
@@ -128,7 +138,7 @@ demag 필드는 3D R2C/C2R FFT를 스텝당 6회(3D) 수행한다. cuFFT 대체�
 ### 왜 A안인가
 
 1. **커널이 이례적으로 단순하다.** shared/warp/texture/fp64 미사용, 인자 타입 5종.
-   66개 전부가 동일 패턴 → `cuda2go.go`(약 200줄)를 확장해 **CUDA C → MSL 트랜스파일러**를
+   65개 전부가 동일 패턴 → `cuda2go.go`(약 200줄)를 확장해 **CUDA C → MSL 트랜스파일러**를
    만드는 것이 번역 레이어를 신뢰하는 것보다 확실하다.
 2. **의존 라이브러리가 3개뿐**이고 사용 심볼이 각각 한 자릿수다. cuFFT는 VkFFT로,
    cuRAND는 Philox 커널 40줄로 대체 가능.
@@ -170,7 +180,7 @@ cuda/
 │   ├── execution.go/.m     LaunchKernel→dispatchThreadgroups (§4.2 배칭)
 │   └── stream.go/.m        Stream→MTLCommandQueue + 누적 CommandBuffer
 ├── mtlfft/                 ★신규: VkFFT-Metal cgo 래퍼 (cufft/ 대체)
-├── *.metal                 ★신규: 66개 MSL 커널 (.cu에서 생성)
+├── *.metal                 ★신규: 65개 MSL 커널 (.cu에서 생성)
 ├── *_wrapper_metal.go      ★신규: cuda2metal이 생성, .metallib 임베딩
 └── cuda2metal.go           ★신규: cuda2go.go 확장 (CUDA C → MSL + Go 래퍼)
 ```
@@ -194,7 +204,7 @@ Memcpy (동기)              →   commit → wait → memcpy (통합 메모리�
 
 ### 4.3 CUDA C → MSL 트랜스파일 규칙
 
-66개 커널이 균일하므로 아래 매핑 테이블로 기계 변환한다.
+65개 커널이 균일하므로 아래 매핑 테이블로 기계 변환한다.
 
 | CUDA | MSL |
 |---|---|
@@ -255,7 +265,7 @@ Apple GPU에 맞춰 타일을 32×8 등으로 튜닝하는 것은 정확성 확�
 | 단계 | 내용 | 산출물 / 검증 |
 |---|---|---|
 | **P0. 골격** | `cuda/mtl` 최소 바인딩(Device/Buffer/Library/Pipeline/CommandQueue) + `madd2` 커널 하나만 수동 MSL 변환 | Go에서 Metal 커널 1개 실행 성공. 아키텍처 리스크 조기 제거 |
-| **P1. 트랜스파일러** | `cuda2metal.go` 작성, 66개 `.cu` → `.metal` 자동 변환, `.metallib` 빌드 + 임베딩, 래퍼 생성 | 66개 전부 컴파일 통과 |
+| **P1. 트랜스파일러** | `cuda2metal.go` 작성, 65개 `.cu` → `.metal` 자동 변환, `.metallib` 빌드 + 임베딩, 래퍼 생성 | 65개 전부 컴파일 통과 |
 | **P2. 런타임** | 메모리(통합 메모리 최적화), 커맨드 버퍼 배칭, `Sync()` 의미론, `init.go`의 디바이스 조회 | `cuda` 패키지 단위 테스트 통과 |
 | **P3. reduce** | 2-pass + `simd_sum` 재설계 | reduce 6종 CPU 참조값 대비 검증 |
 | **P4. FFT** | VkFFT-Metal cgo 래퍼(`mtlfft`), `fft3dr2c/c2r` 교체 | `conv_selftest.go` 통과, cuFFT 대비 수치 비교 |
@@ -279,7 +289,7 @@ Apple GPU에 맞춰 타일을 32×8 등으로 튜닝하는 것은 정확성 확�
    → 통계량(평균 자기화, 요동 분산) 및 물리 법칙(FDT, 평형 분포) 검증으로 대체.
 3. **컨볼루션 자체 검증**: 기존 `conv_selftest.go` / `oommf/` 비교 경로를 그대로 활용.
 4. **커널 단위 검증**: 트랜스파일 단계에서 커널별로 무작위 입력 → CPU 참조 구현과 대조하는
-   하네스를 만든다. 66개를 한 번에 통합한 뒤 디버깅하는 것은 피한다.
+   하네스를 만든다. 65개를 한 번에 통합한 뒤 디버깅하는 것은 피한다.
 
 ---
 
