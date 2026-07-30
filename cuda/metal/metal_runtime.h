@@ -89,7 +89,12 @@ int mr_initialize(char **error_message);
 int mr_shutdown(char **error_message);
 int mr_get_device_info(mr_device_info *info, char **error_message);
 
-int mr_register_source(const void *source, size_t length, char **error_message);
+int mr_register_source(const void *source,
+                       size_t length,
+                       char **error_message);
+int mr_register_source_cached(const void *source,
+                              size_t length,
+                              char **error_message);
 int mr_register_library(const void *library, size_t length, char **error_message);
 
 int mr_alloc(size_t bytes, void **pointer, char **error_message);

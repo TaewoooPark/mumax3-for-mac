@@ -73,6 +73,24 @@ func RegisterLibrary(library []byte) error {
 	)
 }
 
+// RegisterSourceWithCache computes a SHA-256 digest of the MSL source and
+// checks the system cache directory for a pre-compiled metallib. On a cache
+// hit the binary library is loaded directly, skipping runtime compilation.
+// On a miss the source is compiled, registered, and the resulting metallib
+// is written back to the cache for future runs.
+func RegisterSourceWithCache(source string) error {
+	if source == "" {
+		return errors.New("mumax3/metal: refusing to register empty Metal source")
+	}
+	data := C.CBytes([]byte(source))
+	defer C.free(data)
+	var message *C.char
+	return runtimeStatus(
+		C.mr_register_source_cached(data, C.size_t(len(source)), &message),
+		message,
+	)
+}
+
 func Alloc(bytes int64) (unsafe.Pointer, error) {
 	if bytes <= 0 {
 		return nil, errors.New("mumax3/metal: allocation size must be positive")

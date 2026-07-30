@@ -102,7 +102,9 @@ func Init(flags int) {
 			initializeMetalErr = err
 			return
 		}
-		initializeMetalErr = metal.RegisterSource(kernels.Source)
+		// Try loading a pre-compiled metallib from the cache directory
+		// before falling back to runtime source compilation.
+		initializeMetalErr = metal.RegisterSourceWithCache(kernels.Source)
 	})
 	panicMetal(initializeMetalErr)
 }

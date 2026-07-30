@@ -25,6 +25,8 @@
     MPSGraph *inverseGraph;
     MPSGraphTensor *inverseInput;
     MPSGraphTensor *inverseOutput;
+    MPSGraphExecutable *forwardExecutable;
+    MPSGraphExecutable *inverseExecutable;
 }
 @end
 
@@ -199,6 +201,9 @@ extern "C" void *mf_plan_create(const int64_t *dimensions,
                 if (transform == MF_C2R || transform == MF_C2C) {
                     mf_build_inverse_graph(plan);
                 }
+                plan->forwardExecutable = nil;
+                plan->inverseExecutable = nil;
+
                 return (__bridge_retained void *)plan;
             } @catch (NSException *exception) {
                 mf_set_error(error_message, exception.reason);

@@ -28,6 +28,10 @@ func RegisterLibrary(library []byte) error {
 	return ErrUnsupported
 }
 
+func RegisterSourceWithCache(source string) error {
+	return ErrUnsupported
+}
+
 func Alloc(bytes int64) (unsafe.Pointer, error) {
 	return nil, ErrUnsupported
 }

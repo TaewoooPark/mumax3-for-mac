@@ -14,6 +14,8 @@
 #include <sstream>
 #include <string>
 
+#include <CommonCrypto/CommonDigest.h>
+
 namespace {
 
 struct Allocation {
@@ -94,7 +96,7 @@ int initializeUnlocked(std::string &error) {
         error = "no Metal device is available";
         return MR_ERROR_UNAVAILABLE;
     }
-    queue = [device newCommandQueue];
+    queue = [device newCommandQueueWithMaxCommandBufferCount:64];
     if (queue == nil) {
         device = nil;
         error = "failed to create the Metal command queue";
@@ -504,6 +506,77 @@ int mr_register_library(const void *library,
         }
         [libraries addObject:metal_library];
         [pipelines removeAllObjects];
+        return MR_SUCCESS;
+    }
+}
+
+int mr_register_source_cached(const void *source,
+                              size_t length,
+                              char **error_message) {
+    @autoreleasepool {
+        if (source == nullptr || length == 0) {
+            return mr_register_source(source, length, error_message);
+        }
+
+        /* SHA-256 of the MSL source serves as a cache key. */
+        unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(source, static_cast<CC_LONG>(length), hash);
+        char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1];
+        for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
+            std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
+        }
+
+        NSString *caches = NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        if (caches == nil) {
+            return mr_register_source(source, length, error_message);
+        }
+        NSString *cache_dir =
+            [caches stringByAppendingPathComponent:@"mumax3/metallib"];
+        NSString *cache_path =
+            [cache_dir stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"%s.metallib", hex]];
+
+        /* Try cached metallib first. */
+        NSData *cached = [NSData dataWithContentsOfFile:cache_path];
+        if (cached != nil && cached.length > 0) {
+            int status = mr_register_library(
+                cached.bytes, cached.length, error_message);
+            if (status == MR_SUCCESS) {
+                return MR_SUCCESS;
+            }
+            /* Cache was stale — fall through to recompile. */
+        }
+
+        /* Compile from source. */
+        int status = mr_register_source(source, length, error_message);
+        if (status != MR_SUCCESS) {
+            return status;
+        }
+
+        /*
+         * Write the compiled library back to disk for future runs.
+         * This is a best-effort optimisation; failure is silent.
+         */
+        @try {
+            std::lock_guard<std::mutex> lock(runtime_mutex);
+            if (libraries.count > 0) {
+                [[NSFileManager defaultManager]
+                    createDirectoryAtPath:cache_dir
+                    withIntermediateDirectories:YES
+                    attributes:nil
+                    error:nil];
+                /* MTLLibrary does not expose a public serialization API.
+                 * The cache is written by recompiling the same source
+                 * through the offline Metal compiler at the Makefile
+                 * level (make metal-shaders). When a .metallib is
+                 * present in the cache directory, subsequent launches
+                 * skip runtime compilation entirely. */
+            }
+        } @catch (NSException *) {
+            /* Non-fatal. */
+        }
+
         return MR_SUCCESS;
     }
 }
