@@ -56,9 +56,8 @@ func CreatePlan(layout Layout, transform Transform) (uintptr, error) {
 	return uintptr(handle), nil
 }
 
-// Execute appends a transform to the Metal runtime's current command buffer.
-// It deliberately does not commit: Flush/Sync remain the sole ownership point
-// for CUDA-stream-compatible batching.
+// Execute encodes a transform on the runtime's Metal queue. Subsequent work
+// continues on the active command buffer returned by MPSGraph.
 func Execute(handle, input, output uintptr, direction int) error {
 	if handle == 0 || input == 0 || output == 0 {
 		return fmt.Errorf("metal fft: invalid nil plan or buffer")

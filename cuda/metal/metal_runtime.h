@@ -69,8 +69,9 @@ typedef struct mr_device_info {
  * Opaque Metal objects borrowed from the runtime. They remain valid only
  * between mr_begin_external and mr_end_external. Objective-C++ adapters may
  * bridge-cast these values to id<MTLDevice>, id<MTLCommandQueue>, and
- * id<MTLCommandBuffer>. They must append work without committing the command
- * buffer.
+ * id<MTLCommandBuffer>. If an adapter commits and continues on the same
+ * queue, return its active buffer in command_buffer and keep it alive through
+ * mr_end_external, including on encoding failure.
  */
 typedef struct mr_external_context {
     void *device;
