@@ -248,6 +248,8 @@ extern "C" int mf_plan_execute(void *opaquePlan,
         }
 
         int result = MF_SUCCESS;
+        // The runtime borrows the wrapper's root until mr_end_external returns.
+        __attribute__((objc_precise_lifetime)) MPSCommandBuffer *mpsCommandBuffer = nil;
         @try {
             mr_buffer_view inputView = {};
             runtimeStatus = mr_resolve_buffer_locked(input, inputBytes, &inputView, &runtimeError);
@@ -291,7 +293,7 @@ extern "C" int mf_plan_execute(void *opaquePlan,
                 } else {
                     id<MTLCommandBuffer> commandBuffer =
                         (__bridge id<MTLCommandBuffer>)context.command_buffer;
-                    MPSCommandBuffer *mpsCommandBuffer =
+                    mpsCommandBuffer =
                         [MPSCommandBuffer commandBufferWithCommandBuffer:commandBuffer];
                     NSDictionary<MPSGraphTensor *, MPSGraphTensorData *> *feeds =
                         @{inputTensor: inputData};
@@ -309,6 +311,10 @@ extern "C" int mf_plan_execute(void *opaquePlan,
             result = MF_ERROR_ENCODING;
         }
 
+        // MPSGraph can commit and continue even before an encoding exception.
+        if (mpsCommandBuffer != nil) {
+            context.command_buffer = (__bridge void *)mpsCommandBuffer.rootCommandBuffer;
+        }
         char *endError = nullptr;
         const int endStatus = mr_end_external(&context, result != MF_SUCCESS, &endError);
         if (endStatus != MR_SUCCESS) {

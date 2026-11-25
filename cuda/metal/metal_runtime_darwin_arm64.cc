@@ -173,15 +173,7 @@ int checkSubmittedCommandUnlocked(id<MTLCommandBuffer> command_buffer,
     return MR_SUCCESS;
 }
 
-int submitUnlocked(bool wait, std::string &error) {
-    if (current_command_buffer != nil) {
-        id<MTLCommandBuffer> submitting = current_command_buffer;
-        current_command_buffer = nil;
-        encoded_operation_count = 0;
-        [submitting commit];
-        [submitted_command_buffers addObject:submitting];
-    }
-
+int collectSubmittedUnlocked(bool wait, std::string &error) {
     if (submitted_command_buffers.count == 0) {
         return MR_SUCCESS;
     }
@@ -221,6 +213,16 @@ int submitUnlocked(bool wait, std::string &error) {
         error = first_error;
     }
     return first_status;
+}
+
+int submitUnlocked(bool wait, std::string &error) {
+    if (current_command_buffer != nil) {
+        [current_command_buffer commit];
+        [submitted_command_buffers addObject:current_command_buffer];
+        current_command_buffer = nil;
+        encoded_operation_count = 0;
+    }
+    return collectSubmittedUnlocked(wait, error);
 }
 
 int operationEncodedUnlocked(std::string &error) {
@@ -1151,11 +1153,19 @@ int mr_end_external(mr_external_context *context,
                         error_message,
                         "external Metal context token is invalid");
         }
-        std::memset(context, 0, sizeof(*context));
-        active_external_token = 0;
         std::string error;
         int status = MR_SUCCESS;
-        if (encoder_failed == 0) {
+        id<MTLCommandBuffer> active = (__bridge id<MTLCommandBuffer>)context->command_buffer;
+        if (active != current_command_buffer) {
+            // The adapter already committed the old buffer on our queue.
+            [submitted_command_buffers addObject:current_command_buffer];
+            current_command_buffer = active;
+            encoded_operation_count = 0;
+            status = collectSubmittedUnlocked(false, error);
+        }
+        std::memset(context, 0, sizeof(*context));
+        active_external_token = 0;
+        if (status == MR_SUCCESS && encoder_failed == 0) {
             status = operationEncodedUnlocked(error);
         }
         runtime_mutex.unlock();
